@@ -1,30 +1,34 @@
 #!/usr/bin/env python
 import subprocess
+import matplotlib as mpl
+mpl.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.dates import YearLocator, MonthLocator, DayLocator, WeekdayLocator, DateFormatter, MONDAY
 import datetime
+from datetime import datetime as datet
 from dateutil.relativedelta import relativedelta
 import numpy as np
 import pylab
 import argparse
+import os
 
 
 ######################
 ###### Parser ########
 ######################
 parser = argparse.ArgumentParser()
-parser.add_argument("-p", help="Show cumulative usage in percent",
-                    action="store_true", default=0)
-parser.add_argument("-b", help="Use bar plot",
-                    action="store_true", default=0)
-parser.add_argument("-B", help="Use bar-marker plot",
-                    action="store_true", default=0)
-parser.add_argument("-g", help="Show grid",
-                    action="store_true", default=0)
 parser.add_argument("-d", help="Number of past days, starting from today, from which to start gathering data (Default: 90)",
                     type=int, default=90)
-parser.add_argument("-f", help="Filename of output figure (Default: CPUsage.eps)",
-                    type=str, default='CPUsage.eps')
+parser.add_argument("-D", help="Plot only number of days defined by '-d'",
+                    action="store_true", default=0)
+parser.add_argument("-f", help="Name of datafile/figure (Default: CPUsage.txt/eps)",
+                    type=str, default='CPUsage')
+parser.add_argument("-g", help="Show grid",
+                    action="store_true", default=0)
+parser.add_argument("-p", help="Show cumulative usage in percent",
+                    action="store_true", default=0)
+parser.add_argument("-s", help="Use ssh. Write full command (ssh -flags xxx@yyy.zzz)",
+                    type=str, default='')
 args = parser.parse_args()
 
 
@@ -36,158 +40,325 @@ args = parser.parse_args()
 clusterList = {'abisko': 300000, 'triolith': 100000}
 
 
+
+##################################
+###### Set up dateobjects ########
+##################################
+months = MonthLocator()
+days = DayLocator()
+
+today = datetime.date.today()
+oneDay = datetime.timedelta(days=1)
+oneMonth = relativedelta(months=+1)
+
+yearsFmt = DateFormatter("%d %b '%y")
+
+dateFormat = "%Y-%m-%d"
+
+#########################
+###### THE Class ########
+#########################
+class CPUsageData(object):
+
+    def __init__(self):
+        self.clusterName = ''
+
+        self.dates = []
+        self.usage = {}
+        self.users = []
+        self.nDates = 0
+
+        self.cumUsage = {}
+        self.expandedDates = []
+
+    def __repr__(self):
+        string = 'Cluster:\t' + self.clusterName + '\n'
+        string += 'Dates:'
+        for element in self.dates:
+            string += '\t' + str(element)
+        for user in self.usage:
+            string += '\n' + user + ':'
+            for value in self.usage[user]:
+                string += '\t' + str(value)
+        return string
+
+    def printData(self):
+        print self.clusterName
+        print self.dates
+        print self.usage
+        print self.users
+
+    def importData(self,filename,dateFormat):
+        if os.path.isfile(filename):
+            lines = open(filename, 'r').read().splitlines()
+            tmpData = [line.split('\t') for line in lines]
+            for i in range(len(tmpData)):
+                if tmpData[i][0] == 'Cluster':
+                    self.clusterName = tmpData[i][1]
+                elif tmpData[i][0] == 'Date' or tmpData[i][0] == 'Dates':
+                    self.dates = [datet.strptime(ts, dateFormat).date() for ts in tmpData[i][1:]]
+                    self.nDates = len(self.dates)
+                else:
+                    self.usage[tmpData[i][0]] = map(int,tmpData[i][1:])
+                    self.users.append(tmpData[i][0])
+
+    def exportData(self,filename):
+        f = open(filename, 'w')
+        f.write('Cluster\t' + self.clusterName + '\n')
+        f.write('Dates')
+        for element in self.dates:
+            f.write('\t' + str(element))
+        for user in self.usage:
+            f.write('\n' + user)
+            for value in self.usage[user]:
+                f.write('\t' + str(value))
+        f.close()
+
+    def addUsage(self,cluster,newUsage,newDate):
+        if not self.clusterName:
+            self.clusterName = cluster
+        if cluster == self.clusterName or not cluster:
+            self.dates.append(newDate)
+            self.nDates += 1
+            for user in self.users:
+                if user not in newUsage:
+                    self.usage[user].append(0)
+            for user in newUsage:
+                try:
+                    self.usage[user].append(newUsage[user])
+                except KeyError:
+                    self.usage[user] = self.nDates*[0]
+                    self.usage[user][self.nDates-1] = newUsage[user]
+                    self.users.append(user)
+        else:
+            print 'Cluster != clusterName.'
+
+    def overwriteUsage(self,cluster,newUsage,newDate):
+        if not self.clusterName:
+            self.clusterName = cluster
+        if cluster == self.clusterName or not cluster:
+            if self.dateExists(newDate):
+                index = self.getDateIndex(newDate)
+                for user in newUsage:
+                    try:
+                        self.usage[user][index] = newUsage[user]
+                    except KeyError:
+                        self.usage[user] = self.nDates*[0]
+                        self.usage[user][index] = newUsage[user]
+                        self.users.append(user)
+            else:
+                print 'Error: Can not overwrite a nonexisting date.'
+        else:
+            print 'Cluster != clusterName.'
+
+    def getLatestDate(self):
+        if not self.isSorted():
+            self.sort()
+        return self.dates[-1]
+
+    def isLatestDate(self,testDate):
+        return self.getLatestDate() == testDate
+
+    def dateExists(self,testDate):
+        return testDate in self.dates
+
+    def getDateIndex(self,testDate):
+        return self.dates.index(testDate)
+
+    def isSorted(self):
+        notSorted = 0
+        for i in range(self.nDates-1):
+            notSorted += not self.dates[i] < self.dates[i+1]
+        return not notSorted
+
+    def sort(self):
+        if not self.isSorted():
+            sortindex = np.argsort(np.array(self.dates))
+            for key in self.usage:
+                self.usage[key] = [self.usage[key][index] for index in sortindex]
+            self.dates = [self.dates[index] for index in sortindex]
+
+    def isConsecutive(self):
+        for i in range(self.nDates-1):
+            if self.dates[i]+oneDay != self.dates[i+1]:
+                return False
+        return True
+
+    def dataCheck(self):
+        somethingWrong = False
+        if self.nDates != len(self.dates):
+            somethingWrong = True
+            print 'nDates != number of dates.'
+        for user in self.users:
+            if self.nDates != len(self.usage[user]):
+                somethingWrong = True
+                print "nDates != number of data points for user '" + user + "'."
+        for user in self.users:
+            if user not in self.usage:
+                somethingWrong = True
+                print "user '" + user + "' missing from usage."
+        for user in self.usage:
+            if user not in self.users:
+                somethingWrong = True
+                print "user '" + user + "' missing from users."
+        return somethingWrong
+
+    def calcCumulativeUsage(self):
+        self.sort()
+        if self.isConsecutive():
+            startDate = self.dates[0]
+            endDate = self.dates[-1]
+            expandedStartDate = startDate - oneMonth
+            expandedEndDate = endDate + oneMonth
+            startDays = startDate - expandedStartDate
+            endDays = expandedEndDate - endDate
+
+            self.expandedDates = [startDate + i*oneDay for i in range(self.nDates+endDays.days)]
+            for user in self.users:
+                tmpUsage = np.array((startDays.days+self.nDates+endDays.days)*[0])
+                tmpUsage[startDays.days:startDays.days+self.nDates] = self.usage[user]
+
+                self.cumUsage[user] = np.array((self.nDates+endDays.days)*[0])
+                for i in range(self.nDates+endDays.days):
+                    currentDate = startDate + i*oneDay
+                    minusOneMonthDate = currentDate - oneMonth
+                    daysInBetween = (currentDate-minusOneMonthDate).days
+
+                    self.cumUsage[user][i] = sum(tmpUsage[startDays.days + i - daysInBetween:startDays.days + i+1])
+
+    def plot(self,filename):
+        if self.usage:
+            if not self.cumUsage:
+                self.calcCumulativeUsage()
+
+            fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True,figsize=(16, 9))
+
+            startIteration = 0
+            if args.D:
+                startIteration = max(self.nDates-args.d,0)
+
+            if args.p:
+                try:
+                    factor = 100.0/clusterList[self.clusterName]
+                    yLabel = 'Rolling Cumulative Usage (%)'
+                except KeyError:
+                    print 'Unrecognized resource named ' + self.clusterName + ', disregarding the -p flag'
+                    factor = 1
+                    yLabel = 'Rolling Cumulative Usage (ch)'
+            else:
+                factor = 1
+                yLabel = 'Rolling Cumulative Usage (ch)'
+
+            colors = {}
+            barColor = [0.4,0.4,0.4]
+            for user in self.users:
+                if user == 'Total':
+                    colors[user] = barColor
+                else:
+                    colors[user] = next(ax1._get_lines.color_cycle)
+
+            ##### Subplot 1 ######
+            for i in range(startIteration,self.nDates):
+                currentUsage = [self.usage[user][i] for user in self.users]
+                indices = np.argsort(currentUsage)[::-1]
+                if self.users[indices[0]] != 'Total':
+                    indices[0], indices[1] = indices[1], indices[0]
+                for idx in indices:
+                    ax1.bar(self.dates[i],currentUsage[idx]/60.0,color=colors[self.users[idx]],label=getFirstName(self.users[idx]) if i==startIteration else '',align='center')
+
+            ##### Subplot 2 ######
+            for user in self.users:
+                if user != 'Total':
+                    ax2.plot_date(self.expandedDates[startIteration:self.nDates],factor*self.cumUsage[user][startIteration:self.nDates]/60.0,'-'+colors[user],label=getFirstName(user))
+                    ax2.plot_date(self.expandedDates[self.nDates-1:],factor*self.cumUsage[user][self.nDates-1:]/60.0,'--'+colors[user])
+                else:
+                    ax2.plot_date(self.expandedDates[startIteration:self.nDates],factor*self.cumUsage[user][startIteration:self.nDates]/60.0,'-',color=colors[user],label=getFirstName(user),linewidth=2)
+                    ax2.plot_date(self.expandedDates[self.nDates-1:],factor*self.cumUsage[user][self.nDates-1:]/60.0,'--',color=colors[user],linewidth=2)
+
+            ##### axies, labels etc. ######
+            plt.minorticks_on()
+            if args.g:
+                ax1.grid()
+                ax2.grid()
+                ax1.set_axisbelow(True)
+                ax2.set_axisbelow(True)
+            ax1.xaxis.set_major_locator(months)
+            ax1.xaxis.set_major_formatter(yearsFmt)
+            ax1.xaxis.set_minor_locator(days)
+
+            ax1.legend(bbox_to_anchor=(0., 1.02, 1., .102), loc=3,ncol=len(self.users), mode="expand", borderaxespad=0.,numpoints = 1)
+            ax1.set_ylabel('Daily Usage (ch)')
+            ax2.set_ylabel(yLabel)
+
+            ##### Save figure ######
+            pylab.savefig(filename, bbox_inches='tight', dpi=300)
+            #plt.show()
+
+
 #########################
 ###### Functions ########
 #########################
-def getFirstName(string):
-    if type(string) == str:
-        splitString = string.split(" ")
-        return splitString[0]
-
-def getCumulative(usage,dtF,lastDate,dtL,nDays):
-    tmpUsage = np.array((nDays+dtF.days+dtL.days)*[0])
-    tmpUsage[dtL.days:dtL.days+nDays] = usage
-
-    newDates = []
-    cumUsage = np.array((nDays+dtL.days)*[0])
-    for i in range(nDays+dtL.days):
-        currentDate = lastDate-i*dt
-        minusOneMonthDate = currentDate-relativedelta(months=+1)
-
-        daysInBetween = (currentDate-minusOneMonthDate).days
-        cumUsage[i] = sum(tmpUsage[i:i+daysInBetween])
-        newDates.append(currentDate)
-    return newDates, cumUsage
-
-
-###########################
-###### Gather data ########
-###########################
-months = MonthLocator()
-days = DayLocator()
-yearsFmt = DateFormatter("%d %b '%y")
-
-today = datetime.date.today()
-dt = datetime.timedelta(days=1)
-nDays = args.d
-
-srepCommand = 'sreport -np cluster AccountUtilizationByUser Account=snic2015-10-21 format=Cluster,Accounts,Login,Proper,Used'
-
-dates = []
-usage = {}
-cluster = ''
-nCols = []
-for i in range(nDays):
-    currentDate = today-i*dt
-
-    out, err = subprocess.Popen(srepCommand.split(' ')+['start='+str(currentDate)]+['end='+str(currentDate+dt)], stdout=subprocess.PIPE).communicate()
+def parseOutput(out):
+    nCols = 0
+    usage = {}
+    cluster = ''
     if out:
         outArray = out.split('|')
         for index, element in enumerate(outArray):
             if "\n" in element and not nCols:
                 nCols = index
-        if not cluster:
-            cluster = outArray[0]
+        cluster = outArray[0]
         for j in range(len(outArray)/nCols):
-            try:
-                usage[outArray[3+nCols*j]][i] = int(outArray[4+nCols*j])
-            except KeyError:
-                usage[outArray[3+nCols*j]] = np.array(nDays*[0])
-                usage[outArray[3+nCols*j]][i] = int(outArray[4+nCols*j])
+            if outArray[3+nCols*j] == '':
+                outArray[3+nCols*j] = 'Total'
+            usage[outArray[3+nCols*j]] = int(outArray[4+nCols*j])
+    return cluster, usage
 
-    dates.append(currentDate)
+def getFirstName(string):
+    if type(string) == str:
+        splitString = string.split(" ")
+        return splitString[0]
 
-firstDate = dates[-1]-relativedelta(months=+1)
-lastDate = dates[0]+relativedelta(months=+1)
-dtF = dates[-1]-firstDate
-dtL = lastDate-dates[0]
 
-cumUsage = {}
-for user in usage:
-    newDates, cumUsage[user] = getCumulative(usage[user],dtF,lastDate,dtL,nDays)
 
-if args.p:
-    try:
-        factor = 100.0/clusterList[cluster]
-        yLabel = 'Rolling Cumulative Usage (%)'
-    except KeyError:
-        print 'Unrecognized resource named ' + cluster + ', disregarding the -p flag'
-        factor = 1
-        yLabel = 'Rolling Cumulative Usage (ch)'
+###########################
+###### Main script ########
+###########################
+nDays = args.d
+dataFileName = args.f + '.txt'
+figureFileName = args.f + '.png'
+
+srepCommand = 'sreport -np cluster AccountUtilizationByUser Account=snic2015-10-21 format=Cluster,Accounts,Login,Proper,Used'
+if args.s:
+    command = args.s + ' ' + srepCommand
 else:
-    factor = 1
-    yLabel = 'Rolling Cumulative Usage (ch)'
+    command = srepCommand
 
+CPUsageData = CPUsageData()
 
-######################
-##### Figure 1 #######
-######################
-fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True,figsize=(16, 9))
+print "Importing data from '%s'." % dataFileName
+CPUsageData.importData(dataFileName,dateFormat)
 
+print "Fetching data from cluster."
+for i in range(nDays)[::-1]:
+    currentDate = today-i*oneDay
+    if not CPUsageData.dateExists(currentDate):
+        out, err = subprocess.Popen(command.split(' ')+['start='+str(currentDate)]+['end='+str(currentDate+oneDay)], stdout=subprocess.PIPE).communicate()
 
-users = usage.keys()
-colors = {}
-barColor = [0.4,0.4,0.4]
-for user in users:
-    if not user:
-        colors[user] = barColor
-    else:
-        colors[user] = next(ax1._get_lines.color_cycle)
+        cluster, usage = parseOutput(out)
+        CPUsageData.addUsage(cluster,usage,currentDate)
+    elif CPUsageData.isLatestDate(currentDate):
+        out, err = subprocess.Popen(command.split(' ')+['start='+str(currentDate)]+['end='+str(currentDate+oneDay)], stdout=subprocess.PIPE).communicate()
 
-if args.b:
-    for i in range(nDays):
-        currentUsage = [usage[user][i] for user in users]
-        indices = np.argsort(currentUsage)[::-1]
-        if users[indices[0]]:
-            indices[0], indices[1] = indices[1], indices[0]
-        for idx in indices:
-            if users[idx]:
-                ax1.bar(dates[i],currentUsage[idx]/60.0,color=colors[users[idx]],label=getFirstName(users[idx]) if not i else '',align='center')
-            else:
-                ax1.bar(dates[i],currentUsage[idx]/60.0,color=barColor,label='Total' if not i else '',align='center')
-else:
-    for user in usage:
-        if user:
-            if args.B:
-                lalala = usage[user]>np.array(len(usage[user])*[0])
-                indx, = np.where(lalala)
-                ax1.plot_date([dates[i] for i in indx],usage[user][lalala]/60.0,label=getFirstName(user),fmt='o'+colors[user])
-            else:
-                ax1.plot_date(dates,usage[user]/60.0,'-'+colors[user],label=getFirstName(user))
-
-        else:
-            if args.B:
-                ax1.bar(dates,usage[user]/60.0,facecolor=barColor,alpha=0.5,label='Total',align='center')
-            else:
-                ax1.plot_date(dates,usage[user]/60.0,'-',color=colors[user],label='Total',linewidth=2)
-
-
-##### Subplot 2 ######
-for user in cumUsage:
-    if user:
-        ax2.plot_date(newDates[dtL.days:],factor*cumUsage[user][dtL.days:]/60.0,'-'+colors[user],label=getFirstName(user))
-        ax2.plot_date(newDates[:dtL.days+1],factor*cumUsage[user][:dtL.days+1]/60.0,'--'+colors[user])
-    else:
-        ax2.plot_date(newDates[dtL.days:],factor*cumUsage[user][dtL.days:]/60.0,'-',color=colors[user],label='Total',linewidth=2)
-        ax2.plot_date(newDates[:dtL.days+1],factor*cumUsage[user][:dtL.days+1]/60.0,'--',color=colors[user],linewidth=2)
-
-
-##### axies, labels etc. ######
-plt.minorticks_on()
-if args.g:
-    ax1.grid()
-    ax2.grid()
-    ax1.set_axisbelow(True)
-    ax2.set_axisbelow(True)
-ax1.xaxis.set_major_locator(months)
-ax1.xaxis.set_major_formatter(yearsFmt)
-ax1.xaxis.set_minor_locator(days)
-
-ax1.legend(bbox_to_anchor=(0., 1.02, 1., .102), loc=3,ncol=len(usage), mode="expand", borderaxespad=0.,numpoints = 1)
-ax1.set_ylabel('Daily Usage (ch)')
-ax2.set_ylabel(yLabel)
-
-
-##### Save figure ######
-pylab.savefig(args.f, bbox_inches='tight')
-#plt.show()
+        cluster, usage = parseOutput(out)
+        CPUsageData.overwriteUsage(cluster,usage,currentDate)
+    print '\r',
+    print '%.1f' % (100*(1-float(i)/nDays))+'%',
+    #CPUsageData.dataCheck()
+print ''
+CPUsageData.sort()
+print "Exporting data to '%s'." % dataFileName
+CPUsageData.exportData(dataFileName)
+print "Generating figure named '%s'." % figureFileName
+CPUsageData.plot(figureFileName)
+print 'Done!'
